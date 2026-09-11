@@ -1,0 +1,530 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum AdminStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum EventStatus {
+  DRAFT
+  SCHEDULED
+  LIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum RoundStatus {
+  LOCKED
+  LIVE
+  ENDED
+}
+
+enum RoundKind {
+  VAGUE_TO_PRECISE
+  PROMPT_REVERSE_ENGINEERING
+  IMAGE_RECREATION
+}
+
+enum ParticipantStatus {
+  ADMITTED
+  ACTIVE
+  SUSPENDED
+  DISQUALIFIED
+}
+
+enum TeamStatus {
+  ACTIVE
+  DISQUALIFIED
+}
+
+enum TeamRoundStatus {
+  LOCKED
+  ELIGIBLE
+  IN_PROGRESS
+  SUBMITTED
+  APPROVED
+  REJECTED
+}
+
+enum QuestionStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum SubmissionStatus {
+  DRAFT
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+}
+
+enum EvaluationDecision {
+  APPROVED
+  REJECTED
+}
+
+enum ArtifactKind {
+  CONVERSATION_EXPORT
+  GENERATED_IMAGE
+  REFERENCE_IMAGE
+  SUPPORTING_FILE
+}
+
+enum ImportStatus {
+  PREVIEWED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum ImportRowStatus {
+  VALID
+  INVALID
+  IMPORTED
+  DUPLICATE
+}
+
+enum CertificateStatus {
+  ELIGIBLE
+  GENERATING
+  READY
+  FAILED
+}
+
+enum AuditActorType {
+  SYSTEM
+  ADMIN
+  PARTICIPANT
+}
+
+model AdminUser {
+  id           String      @id @default(uuid()) @db.Uuid
+  email        String      @unique @db.VarChar(320)
+  displayName  String      @db.VarChar(120)
+  passwordHash String      @db.VarChar(255)
+  status       AdminStatus @default(ACTIVE)
+  lastLoginAt  DateTime?   @db.Timestamptz(3)
+  createdAt    DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime    @updatedAt @db.Timestamptz(3)
+
+  evaluations   Evaluation[]
+  importBatches ImportBatch[]
+  sessions      AuthSession[]
+  auditLogs     AuditLog[]
+
+  @@map("admin_users")
+}
+
+model Event {
+  id        String      @id @default(uuid()) @db.Uuid
+  slug      String      @unique @db.VarChar(80)
+  name      String      @db.VarChar(160)
+  status    EventStatus @default(DRAFT)
+  startsAt  DateTime    @db.Timestamptz(3)
+  endsAt    DateTime    @db.Timestamptz(3)
+  timezone  String      @default("Asia/Kolkata") @db.VarChar(64)
+  venue     String?     @db.VarChar(200)
+  createdAt DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime    @updatedAt @db.Timestamptz(3)
+
+  rounds        Round[]
+  teams         Team[]
+  importBatches ImportBatch[]
+
+  @@map("events")
+}
+
+model Round {
+  id          String      @id @default(uuid()) @db.Uuid
+  eventId     String      @db.Uuid
+  number      Int
+  kind        RoundKind
+  title       String      @db.VarChar(160)
+  description String      @db.Text
+  status      RoundStatus @default(LOCKED)
+  startsAt    DateTime?   @db.Timestamptz(3)
+  endsAt      DateTime?   @db.Timestamptz(3)
+  version     Int         @default(1)
+  createdAt   DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime    @updatedAt @db.Timestamptz(3)
+
+  event       Event                    @relation(fields: [eventId], references: [id], onDelete: Restrict)
+  rules       RoundRule[]
+  questions   Question[]
+  assignments TeamQuestionAssignment[]
+  accesses    TeamRoundAccess[]
+  submissions Submission[]
+
+  @@unique([eventId, number])
+  @@index([eventId, status])
+  @@map("rounds")
+}
+
+model RoundRule {
+  id        String   @id @default(uuid()) @db.Uuid
+  roundId   String   @db.Uuid
+  position  Int
+  text      String   @db.Text
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  round Round @relation(fields: [roundId], references: [id], onDelete: Cascade)
+
+  @@unique([roundId, position])
+  @@map("round_rules")
+}
+
+model Participant {
+  id         String            @id @default(uuid()) @db.Uuid
+  name       String            @db.VarChar(120)
+  email      String            @unique @db.VarChar(320)
+  status     ParticipantStatus @default(ADMITTED)
+  importedAt DateTime          @default(now()) @db.Timestamptz(3)
+  createdAt  DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime          @updatedAt @db.Timestamptz(3)
+  deletedAt  DateTime?         @db.Timestamptz(3)
+
+  membership TeamMember?
+  sessions   AuthSession[]
+  importRows ImportRow[]
+  auditLogs  AuditLog[]
+
+  @@index([status, createdAt])
+  @@index([deletedAt])
+  @@map("participants")
+}
+
+model Team {
+  id          String     @id @default(uuid()) @db.Uuid
+  eventId     String     @db.Uuid
+  code        String     @unique @db.VarChar(24)
+  status      TeamStatus @default(ACTIVE)
+  createdAt   DateTime   @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime   @updatedAt @db.Timestamptz(3)
+  deletedAt   DateTime?  @db.Timestamptz(3)
+  onboardedAt DateTime?  @db.Timestamptz(3)
+
+  event         Event                    @relation(fields: [eventId], references: [id], onDelete: Restrict)
+  members       TeamMember[]
+  rosterMembers TeamRosterMember[]
+  assignments   TeamQuestionAssignment[]
+  accesses      TeamRoundAccess[]
+  submissions   Submission[]
+  certificates  Certificate[]
+
+  @@index([eventId, status])
+  @@index([deletedAt])
+  @@map("teams")
+}
+
+model TeamRosterMember {
+  id        String   @id @default(uuid()) @db.Uuid
+  teamId    String   @db.Uuid
+  position  Int
+  name      String   @db.VarChar(120)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  certificate Certificate?
+
+  @@unique([teamId, position])
+  @@index([teamId])
+  @@map("team_roster_members")
+}
+
+model Certificate {
+  id                 String            @id @default(uuid()) @db.Uuid
+  teamId             String            @db.Uuid
+  rosterMemberId     String            @unique @db.Uuid
+  memberNameSnapshot String            @db.VarChar(120)
+  certificateCode    String            @unique @db.VarChar(64)
+  eliminatedRound    Int
+  status             CertificateStatus @default(ELIGIBLE)
+  storageBucket      String?           @db.VarChar(128)
+  storagePath        String?           @db.Text
+  fileName           String            @db.VarChar(255)
+  failureMessage     String?           @db.Text
+  generatedAt        DateTime?         @db.Timestamptz(3)
+  createdAt          DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime          @updatedAt @db.Timestamptz(3)
+
+  team         Team             @relation(fields: [teamId], references: [id], onDelete: Restrict)
+  rosterMember TeamRosterMember @relation(fields: [rosterMemberId], references: [id], onDelete: Restrict)
+
+  @@unique([teamId, rosterMemberId])
+  @@index([teamId, status])
+  @@map("certificates")
+}
+
+model TeamMember {
+  id            String   @id @default(uuid()) @db.Uuid
+  teamId        String   @db.Uuid
+  participantId String   @unique @db.Uuid
+  joinedAt      DateTime @default(now()) @db.Timestamptz(3)
+
+  team        Team        @relation(fields: [teamId], references: [id], onDelete: Restrict)
+  participant Participant @relation(fields: [participantId], references: [id], onDelete: Restrict)
+
+  @@unique([teamId, participantId])
+  @@index([teamId, joinedAt])
+  @@map("team_members")
+}
+
+model TeamRoundAccess {
+  id          String          @id @default(uuid()) @db.Uuid
+  teamId      String          @db.Uuid
+  roundId     String          @db.Uuid
+  status      TeamRoundStatus @default(LOCKED)
+  unlockedAt  DateTime?       @db.Timestamptz(3)
+  submittedAt DateTime?       @db.Timestamptz(3)
+  decidedAt   DateTime?       @db.Timestamptz(3)
+  version     Int             @default(1)
+  createdAt   DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime        @updatedAt @db.Timestamptz(3)
+
+  team  Team  @relation(fields: [teamId], references: [id], onDelete: Restrict)
+  round Round @relation(fields: [roundId], references: [id], onDelete: Restrict)
+
+  @@unique([teamId, roundId])
+  @@index([roundId, status])
+  @@map("team_round_accesses")
+}
+
+model Question {
+  id            String         @id @default(uuid()) @db.Uuid
+  roundId       String         @db.Uuid
+  code          String         @db.VarChar(32)
+  position      Int
+  title         String         @db.VarChar(200)
+  body          String         @db.Text
+  status        QuestionStatus @default(DRAFT)
+  isPlaceholder Boolean        @default(false)
+  createdAt     DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime       @updatedAt @db.Timestamptz(3)
+
+  round       Round                    @relation(fields: [roundId], references: [id], onDelete: Restrict)
+  assignments TeamQuestionAssignment[]
+  answers     SubmissionAnswer[]
+  artifacts   SubmissionArtifact[]
+
+  @@unique([id, roundId])
+  @@unique([roundId, code])
+  @@unique([roundId, position])
+  @@index([roundId, status])
+  @@map("questions")
+}
+
+model TeamQuestionAssignment {
+  id         String   @id @default(uuid()) @db.Uuid
+  teamId     String   @db.Uuid
+  roundId    String   @db.Uuid
+  questionId String   @db.Uuid
+  position   Int
+  assignedAt DateTime @default(now()) @db.Timestamptz(3)
+
+  team     Team     @relation(fields: [teamId], references: [id], onDelete: Restrict)
+  round    Round    @relation(fields: [roundId], references: [id], onDelete: Restrict)
+  question Question @relation(fields: [questionId, roundId], references: [id, roundId], onDelete: Restrict)
+
+  @@unique([teamId, roundId, position])
+  @@unique([teamId, questionId])
+  @@index([roundId, questionId])
+  @@map("team_question_assignments")
+}
+
+model Submission {
+  id               String           @id @default(uuid()) @db.Uuid
+  teamId           String           @db.Uuid
+  roundId          String           @db.Uuid
+  status           SubmissionStatus @default(DRAFT)
+  teamCodeSnapshot String?          @db.VarChar(24)
+  aiTool           String?          @db.VarChar(120)
+  responseConversationUrl String?   @db.Text
+  submittedAt      DateTime?        @db.Timestamptz(3)
+  lockedAt         DateTime?        @db.Timestamptz(3)
+  version          Int              @default(1)
+  createdAt        DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime         @updatedAt @db.Timestamptz(3)
+
+  team       Team                 @relation(fields: [teamId], references: [id], onDelete: Restrict)
+  round      Round                @relation(fields: [roundId], references: [id], onDelete: Restrict)
+  answers    SubmissionAnswer[]
+  artifacts  SubmissionArtifact[]
+  evaluation Evaluation?
+
+  @@unique([teamId, roundId])
+  @@index([roundId, status, submittedAt])
+  @@index([teamId, status])
+  @@map("submissions")
+}
+
+model SubmissionAnswer {
+  id              String   @id @default(uuid()) @db.Uuid
+  submissionId    String   @db.Uuid
+  roundId         String   @db.Uuid
+  questionId      String   @db.Uuid
+  conversationUrl String?  @db.Text
+  promptText      String?  @db.Text
+  responseText    String?  @db.Text
+  notes           String?  @db.Text
+  createdAt       DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime @updatedAt @db.Timestamptz(3)
+
+  submission Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  question   Question   @relation(fields: [questionId], references: [id], onDelete: Restrict)
+
+  @@unique([submissionId, questionId])
+  @@index([roundId, questionId])
+  @@map("submission_answers")
+}
+
+model SubmissionArtifact {
+  id             String       @id @default(uuid()) @db.Uuid
+  submissionId   String       @db.Uuid
+  questionId     String?      @db.Uuid
+  kind           ArtifactKind
+  storageBucket  String       @db.VarChar(128)
+  storagePath    String       @db.Text
+  originalName   String?      @db.VarChar(255)
+  mimeType       String       @db.VarChar(127)
+  sizeBytes      Int
+  checksumSha256 String?      @db.Char(64)
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+
+  submission Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  question   Question?  @relation(fields: [questionId], references: [id], onDelete: Restrict)
+
+  @@unique([storageBucket, storagePath])
+  @@index([submissionId, kind])
+  @@map("submission_artifacts")
+}
+
+model Evaluation {
+  id           String             @id @default(uuid()) @db.Uuid
+  submissionId String             @unique @db.Uuid
+  evaluatorId  String             @db.Uuid
+  decision     EvaluationDecision
+  score        Decimal?           @db.Decimal(6, 2)
+  feedback     String?            @db.Text
+  version      Int                @default(1)
+  evaluatedAt  DateTime           @default(now()) @db.Timestamptz(3)
+  createdAt    DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime           @updatedAt @db.Timestamptz(3)
+
+  submission Submission @relation(fields: [submissionId], references: [id], onDelete: Restrict)
+  evaluator  AdminUser  @relation(fields: [evaluatorId], references: [id], onDelete: Restrict)
+
+  @@index([evaluatorId, evaluatedAt])
+  @@index([score])
+  @@map("evaluations")
+}
+
+model AuthSession {
+  id                  String    @id @default(uuid()) @db.Uuid
+  tokenHash           String    @unique @db.Char(64)
+  adminUserId         String?   @db.Uuid
+  participantId       String?   @db.Uuid
+  expiresAt           DateTime  @db.Timestamptz(3)
+  lastUsedAt          DateTime  @default(now()) @db.Timestamptz(3)
+  revokedAt           DateTime? @db.Timestamptz(3)
+  isActive            Boolean   @default(true)
+  revokedReason       String?   @db.VarChar(40)
+  replacedBySessionId String?   @db.Uuid
+  ipAddress           String?   @db.Inet
+  userAgent           String?   @db.VarChar(512)
+  createdAt           DateTime  @default(now()) @db.Timestamptz(3)
+
+  adminUser   AdminUser?   @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  participant Participant? @relation(fields: [participantId], references: [id], onDelete: Cascade)
+
+  @@index([adminUserId, expiresAt])
+  @@index([participantId, expiresAt])
+  @@index([expiresAt, revokedAt])
+  @@index([participantId, isActive])
+  @@map("auth_sessions")
+}
+
+model ImportBatch {
+  id             String       @id @default(uuid()) @db.Uuid
+  eventId        String       @db.Uuid
+  importedById   String       @db.Uuid
+  originalName   String       @db.VarChar(255)
+  checksumSha256 String       @db.Char(64)
+  status         ImportStatus @default(PREVIEWED)
+  totalRows      Int
+  validRows      Int
+  invalidRows    Int
+  importedRows   Int          @default(0)
+  duplicateRows  Int          @default(0)
+  version        Int          @default(1)
+  committedAt    DateTime?    @db.Timestamptz(3)
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime     @updatedAt @db.Timestamptz(3)
+
+  event      Event       @relation(fields: [eventId], references: [id], onDelete: Restrict)
+  importedBy AdminUser   @relation(fields: [importedById], references: [id], onDelete: Restrict)
+  rows       ImportRow[]
+
+  @@index([importedById, createdAt])
+  @@index([eventId, createdAt])
+  @@index([status, createdAt])
+  @@map("import_batches")
+}
+
+model ImportRow {
+  id            String          @id @default(uuid()) @db.Uuid
+  batchId       String          @db.Uuid
+  rowNumber     Int
+  name          String?         @db.VarChar(120)
+  email         String?         @db.VarChar(320)
+  teamCode      String?         @db.VarChar(24)
+  status        ImportRowStatus
+  errorCode     String?         @db.VarChar(80)
+  errorMessage  String?         @db.Text
+  participantId String?         @db.Uuid
+  createdAt     DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime        @updatedAt @db.Timestamptz(3)
+
+  batch       ImportBatch  @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  participant Participant? @relation(fields: [participantId], references: [id], onDelete: SetNull)
+
+  @@unique([batchId, rowNumber])
+  @@index([batchId, status])
+  @@index([email])
+  @@index([teamCode])
+  @@map("import_rows")
+}
+
+model AuditLog {
+  id                 BigInt         @id @default(autoincrement())
+  actorType          AuditActorType
+  actorAdminId       String?        @db.Uuid
+  actorParticipantId String?        @db.Uuid
+  action             String         @db.VarChar(100)
+  entityType         String         @db.VarChar(80)
+  entityId           String?        @db.VarChar(100)
+  requestId          String?        @db.VarChar(100)
+  ipAddress          String?        @db.Inet
+  userAgent          String?        @db.VarChar(512)
+  metadata           Json?
+  createdAt          DateTime       @default(now()) @db.Timestamptz(3)
+
+  actorAdmin       AdminUser?   @relation(fields: [actorAdminId], references: [id], onDelete: SetNull)
+  actorParticipant Participant? @relation(fields: [actorParticipantId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt(sort: Desc), id(sort: Desc)])
+  @@index([entityType, entityId, createdAt(sort: Desc)])
+  @@index([actorAdminId, createdAt(sort: Desc)])
+  @@index([actorParticipantId, createdAt(sort: Desc)])
+  @@map("audit_logs")
+}
