@@ -878,48 +878,93 @@ export const commitImport = async (
         throw conflict("IMPORT_STATE_CONFLICT", "This import was already committed or changed.");
       }
       await tx.importBatch.update({ where: { id: batchId }, data: { status: ImportStatus.PROCESSING, version: { increment: 1 } } });
-      let importedRows = 0;
-      let duplicateRows = 0;
-      for (const row of batch.rows.filter((item) => item.status === ImportRowStatus.VALID)) {
-        if (!row.name || !row.email || !row.teamCode) continue;
-        const existing = await tx.participant.findUnique({ where: { email: row.email } });
-        if (existing) {
-          duplicateRows += 1;
-          await tx.importRow.update({
-            where: { id: row.id },
-            data: { status: ImportRowStatus.DUPLICATE, participantId: existing.id },
-          });
-          continue;
+      const validRows = batch.rows
+        .filter((row) => row.status === ImportRowStatus.VALID && row.name && row.email && row.teamCode)
+        .map((row) => ({ ...row, name: row.name!, email: normalizeEmail(row.email!), teamCode: normalizeTeamCode(row.teamCode!) }));
+
+      const existingParticipants = await tx.participant.findMany({
+        where: { email: { in: validRows.map((row) => row.email) } },
+        select: { id: true, email: true },
+      });
+      const existingParticipantByEmail = new Map(existingParticipants.map((participant) => [participant.email, participant]));
+      const duplicateRows = validRows.filter((row) => existingParticipantByEmail.has(row.email));
+      const rowsToImport = validRows.filter((row) => !existingParticipantByEmail.has(row.email));
+      const teamCodes = [...new Set(rowsToImport.map((row) => row.teamCode))];
+
+      const existingTeams = await tx.team.findMany({
+        where: { code: { in: teamCodes } },
+        select: { id: true, code: true, eventId: true },
+      });
+      const foreignEventTeam = existingTeams.find((team) => team.eventId !== batch.eventId);
+      if (foreignEventTeam) {
+        throw conflict("TEAM_CODE_EVENT_CONFLICT", `Team Code ${foreignEventTeam.code} is already assigned to another event.`);
+      }
+
+      const existingMembershipCounts = existingTeams.length
+        ? await tx.teamMember.groupBy({
+            by: ["teamId"],
+            where: { teamId: { in: existingTeams.map((team) => team.id) } },
+            _count: { _all: true },
+          })
+        : [];
+      const membershipCountByTeam = new Map(existingMembershipCounts.map((entry) => [entry.teamId, entry._count._all]));
+      const existingTeamByCode = new Map(existingTeams.map((team) => [team.code, team]));
+      const incomingCountByCode = new Map<string, number>();
+      for (const row of rowsToImport) incomingCountByCode.set(row.teamCode, (incomingCountByCode.get(row.teamCode) ?? 0) + 1);
+      for (const [teamCode, incomingCount] of incomingCountByCode) {
+        const team = existingTeamByCode.get(teamCode);
+        if ((team ? membershipCountByTeam.get(team.id) ?? 0 : 0) + incomingCount > 3) {
+          throw badRequest("TEAM_SIZE_EXCEEDED", `Team ${teamCode} would have more than three members.`);
         }
-        const normalizedTeamCode = normalizeTeamCode(row.teamCode);
-        const existingTeam = await tx.team.findUnique({ where: { code: normalizedTeamCode } });
-        if (existingTeam && existingTeam.eventId !== batch.eventId) {
-          throw conflict("TEAM_CODE_EVENT_CONFLICT", `Team Code ${normalizedTeamCode} is already assigned to another event.`);
-        }
-        const team = existingTeam ?? await tx.team.create({
-          data: {
-            eventId: batch.eventId,
-            code: normalizedTeamCode,
-          },
-        });
-        const memberCount = await tx.teamMember.count({ where: { teamId: team.id } });
-        if (memberCount >= 3) {
-          throw badRequest("TEAM_SIZE_EXCEEDED", `Team ${normalizedTeamCode} already has three members.`);
-        }
-        const participant = await tx.participant.create({ data: { name: row.name, email: row.email } });
-        await tx.teamMember.create({ data: { teamId: team.id, participantId: participant.id } });
-        importedRows += 1;
-        await tx.importRow.update({
-          where: { id: row.id },
-          data: { status: ImportRowStatus.IMPORTED, participantId: participant.id },
+      }
+
+      const missingTeamCodes = teamCodes.filter((code) => !existingTeamByCode.has(code));
+      if (missingTeamCodes.length) {
+        await tx.team.createMany({ data: missingTeamCodes.map((code) => ({ eventId: batch.eventId, code })) });
+      }
+      const teams = teamCodes.length
+        ? await tx.team.findMany({ where: { code: { in: teamCodes }, eventId: batch.eventId }, select: { id: true, code: true } })
+        : [];
+      const teamByCode = new Map(teams.map((team) => [team.code, team]));
+
+      if (rowsToImport.length) {
+        await tx.participant.createMany({ data: rowsToImport.map((row) => ({ name: row.name, email: row.email })) });
+      }
+      const importedParticipants = rowsToImport.length
+        ? await tx.participant.findMany({
+            where: { email: { in: rowsToImport.map((row) => row.email) } },
+            select: { id: true, email: true },
+          })
+        : [];
+      const importedParticipantByEmail = new Map(importedParticipants.map((participant) => [participant.email, participant]));
+
+      if (rowsToImport.length) {
+        await tx.teamMember.createMany({
+          data: rowsToImport.map((row) => ({
+            teamId: teamByCode.get(row.teamCode)!.id,
+            participantId: importedParticipantByEmail.get(row.email)!.id,
+          })),
         });
       }
+
+      await Promise.all([
+        ...duplicateRows.map((row) => tx.importRow.update({
+          where: { id: row.id },
+          data: { status: ImportRowStatus.DUPLICATE, participantId: existingParticipantByEmail.get(row.email)!.id },
+        })),
+        ...rowsToImport.map((row) => tx.importRow.update({
+          where: { id: row.id },
+          data: { status: ImportRowStatus.IMPORTED, participantId: importedParticipantByEmail.get(row.email)!.id },
+        })),
+      ]);
+      const importedRows = rowsToImport.length;
+      const duplicateRowCount = duplicateRows.length;
       const committed = await tx.importBatch.update({
         where: { id: batchId },
         data: {
           status: ImportStatus.COMPLETED,
           importedRows,
-          duplicateRows,
+          duplicateRows: duplicateRowCount,
           committedAt: new Date(),
           version: { increment: 1 },
         },
@@ -931,7 +976,7 @@ export const commitImport = async (
         entityType: "import_batch",
         entityId: batchId,
         requestId: context.requestId,
-        metadata: { importedRows, duplicateRows, invalidRows: batch.invalidRows },
+        metadata: { importedRows, duplicateRows: duplicateRowCount, invalidRows: batch.invalidRows },
       });
       return committed;
     },
