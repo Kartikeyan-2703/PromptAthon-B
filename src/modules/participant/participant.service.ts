@@ -273,7 +273,7 @@ export const saveSubmissionDraft = async (
 
       return tx.submission.findUniqueOrThrow({ where: { id: submission.id }, include: { answers: true } });
     },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, maxWait: 10_000, timeout: 30_000 },
   );
 };
 
@@ -334,16 +334,23 @@ export const submitRound = async (
       }
 
       const now = new Date();
-      const locked = await tx.submission.update({
-        where: { id: submission.id },
+      const transition = await tx.submission.updateMany({
+        where: { id: submission.id, status: SubmissionStatus.DRAFT },
         data: {
           status: SubmissionStatus.SUBMITTED,
           submittedAt: now,
           lockedAt: now,
           version: { increment: 1 },
         },
-        include: { answers: true },
       });
+      if (transition.count === 0) {
+        const current = await tx.submission.findUniqueOrThrow({
+          where: { id: submission.id },
+          include: { answers: true },
+        });
+        if (current.status !== SubmissionStatus.DRAFT) return current;
+        throw conflict("SUBMISSION_STATE_CONFLICT", "The submission changed while it was being submitted. Please try once more.");
+      }
       await tx.teamRoundAccess.update({
         where: { id: access.id },
         data: { status: TeamRoundStatus.SUBMITTED, submittedAt: now, version: { increment: 1 } },
@@ -356,9 +363,9 @@ export const submitRound = async (
         requestId,
         metadata: { roundNumber, answerCount: answers.length },
       });
-      return locked;
+      return tx.submission.findUniqueOrThrow({ where: { id: submission.id }, include: { answers: true } });
     },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, maxWait: 10_000, timeout: 30_000 },
   );
 };
 
