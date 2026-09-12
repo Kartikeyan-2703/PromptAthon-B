@@ -16,7 +16,7 @@ export const saveSubmissionSchema = z.object({
       z.object({
         questionId: z.uuid(),
         conversationUrl: z.url({ protocol: /^https?$/ }).max(2048).optional(),
-        promptText: z.string().trim().max(20_000).optional(),
+        promptText: z.string().trim().optional(),
         responseText: z.string().trim().max(50_000).optional(),
         notes: z.string().trim().max(5_000).optional(),
       }),

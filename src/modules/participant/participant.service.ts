@@ -216,6 +216,14 @@ export const saveSubmissionDraft = async (
       }
       const access = round.accesses[0];
       if (round.status !== RoundStatus.LIVE || !access) throw forbidden("This round is not open.");
+      const existing = await tx.submission.findUnique({
+        where: { teamId_roundId: { teamId, roundId: round.id } },
+        include: { answers: true },
+      });
+      // If the first request committed but its response was interrupted, a
+      // retry must report the persisted submission instead of failing with a
+      // misleading "locked" error.
+      if (existing && existing.status !== SubmissionStatus.DRAFT) return existing;
       if (access.status !== TeamRoundStatus.ELIGIBLE && access.status !== TeamRoundStatus.IN_PROGRESS) {
         throw forbidden("This submission is locked.");
       }
@@ -225,8 +233,6 @@ export const saveSubmissionDraft = async (
         throw badRequest("QUESTION_NOT_ASSIGNED", "One or more answers refer to an unassigned question.");
       }
 
-      const existing = await tx.submission.findUnique({ where: { teamId_roundId: { teamId, roundId: round.id } } });
-      if (existing && existing.status !== SubmissionStatus.DRAFT) throw conflict("SUBMISSION_LOCKED", "The submission is already locked.");
       if (existing && input.version !== undefined && existing.version !== input.version) {
         throw conflict("STALE_SUBMISSION", "The submission changed in another session. Refresh and try again.", {
           currentVersion: existing.version,
