@@ -51,10 +51,6 @@ export const loginParticipant = async (rawEmail: string, rawTeamCode: string, co
   if (participant.status !== ParticipantStatus.ADMITTED && participant.status !== ParticipantStatus.ACTIVE) {
     throw forbidden("This participant account is not active.");
   }
-  if (participant.membership && participant.membership.teamId !== team.id) {
-    throw conflict("TEAM_MEMBERSHIP_CONFLICT", "This participant is already assigned to another team.");
-  }
-
   return prisma.$transaction(
     async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${participant.id}, 0))`;
@@ -64,7 +60,30 @@ export const loginParticipant = async (rawEmail: string, rawTeamCode: string, co
       });
 
       if (current.membership && current.membership.teamId !== team.id) {
-        throw conflict("TEAM_MEMBERSHIP_CONFLICT", "This participant is already assigned to another team.");
+        const targetSize = await tx.teamMember.count({ where: { teamId: team.id } });
+        if (targetSize >= 3) {
+          throw conflict("TEAM_SIZE_EXCEEDED", "The supplied team already has three participants.");
+        }
+
+        // The organizer-issued team code is the authoritative team identity.
+        // Existing admitted rows can retain an older membership after a roster
+        // correction/import; reconcile that stale link instead of locking the
+        // participant out of the event.
+        const previousTeamId = current.membership.teamId;
+        await tx.teamMember.update({
+          where: { participantId: current.id },
+          data: { teamId: team.id },
+        });
+        await writeAuditLog(tx, {
+          actor: { type: "participant", id: current.id },
+          action: "participant.team_membership.reconciled",
+          entityType: "participant",
+          entityId: current.id,
+          requestId: context.requestId,
+          ipAddress: context.ipAddress,
+          userAgent: context.userAgent,
+          metadata: { previousTeamId, teamId: team.id, teamCode },
+        });
       }
 
       if (!current.membership) {
