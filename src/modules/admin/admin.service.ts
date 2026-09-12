@@ -165,6 +165,80 @@ export const listSubmissions = async (query: {
     select: { id: true, number: true, title: true, status: true },
   });
   if (!round) throw notFound("Round");
+  if (round.number === 1 && (query.status === "APPROVED" || query.status === "REJECTED")) {
+    const accessStatus = query.status === "APPROVED" ? TeamRoundStatus.APPROVED : TeamRoundStatus.REJECTED;
+    const accessWhere: Prisma.TeamRoundAccessWhereInput = {
+      roundId: round.id,
+      status: accessStatus,
+      team: {
+        deletedAt: null,
+        ...(query.search ? { code: { contains: query.search, mode: "insensitive" } } : {}),
+      },
+    };
+    const [total, accesses, groupedAccessCounts, groupedSubmissionCounts] = await Promise.all([
+      prisma.teamRoundAccess.count({ where: accessWhere }),
+      prisma.teamRoundAccess.findMany({
+        where: accessWhere,
+        orderBy: [{ decidedAt: "desc" }, { id: "desc" }],
+        skip: (query.page - 1) * query.pageSize,
+        take: query.pageSize,
+        include: {
+          team: {
+            select: {
+              id: true,
+              code: true,
+              submissions: {
+                where: { roundId: round.id },
+                take: 1,
+                include: {
+                  evaluation: true,
+                  _count: { select: { answers: true, artifacts: true } },
+                },
+              },
+            },
+          },
+        },
+      }),
+      prisma.teamRoundAccess.groupBy({
+        by: ["status"],
+        where: { roundId: round.id, team: { deletedAt: null } },
+        _count: { _all: true },
+      }),
+      prisma.submission.groupBy({
+        by: ["status"],
+        where: { roundId: round.id, status: { in: [SubmissionStatus.SUBMITTED, SubmissionStatus.UNDER_REVIEW] } },
+        _count: { _all: true },
+      }),
+    ]);
+    const counts = { SUBMITTED: 0, UNDER_REVIEW: 0, APPROVED: 0, REJECTED: 0 };
+    for (const row of groupedAccessCounts) {
+      if (row.status === TeamRoundStatus.APPROVED) counts.APPROVED = row._count._all;
+      if (row.status === TeamRoundStatus.REJECTED) counts.REJECTED = row._count._all;
+    }
+    for (const row of groupedSubmissionCounts) {
+      if (row.status === SubmissionStatus.SUBMITTED) counts.SUBMITTED = row._count._all;
+      if (row.status === SubmissionStatus.UNDER_REVIEW) counts.UNDER_REVIEW = row._count._all;
+    }
+    const items = accesses.map((access) => {
+      const submission = access.team.submissions[0];
+      return submission
+        ? { ...submission, team: { id: access.team.id, code: access.team.code }, round, hasSubmission: true }
+        : {
+            id: `access:${access.id}`,
+            status: query.status!,
+            teamCodeSnapshot: access.team.code,
+            aiTool: null,
+            submittedAt: null,
+            version: access.version,
+            team: { id: access.team.id, code: access.team.code },
+            round,
+            evaluation: null,
+            _count: { answers: 0, artifacts: 0 },
+            hasSubmission: false,
+          };
+    });
+    return { round, counts, items, page: query.page, pageSize: query.pageSize, total, pageCount: Math.ceil(total / query.pageSize) };
+  }
   const where: Prisma.SubmissionWhereInput = {
     roundId: round.id,
     status: query.status ?? { not: SubmissionStatus.DRAFT },
@@ -196,7 +270,7 @@ export const listSubmissions = async (query: {
   for (const row of groupedCounts) {
     if (row.status !== SubmissionStatus.DRAFT) counts[row.status] = row._count._all;
   }
-  return { round, counts, items, page: query.page, pageSize: query.pageSize, total, pageCount: Math.ceil(total / query.pageSize) };
+  return { round, counts, items: items.map((item) => ({ ...item, hasSubmission: true })), page: query.page, pageSize: query.pageSize, total, pageCount: Math.ceil(total / query.pageSize) };
 };
 
 export const markSubmissionUnderReview = async (
